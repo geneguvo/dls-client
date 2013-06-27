@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-delete-fileblocksbylocation,v 1.7 2008/05/20 14:27:54 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $
+# Alessandra Fanfani Univ./INFN Bologna. CMS.
+
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry
+import dlsClient
+from dlsCommandsCommon import *
+import sys
+import commands
+import getopt
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC", "DLS_TYPE_MYSQL"]
+
+
+
+######################### FUNCTIONS ########################
+
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-delete-fileblockbylocation [-v, -e, -i] <location>"
+   print "       dls-delete-fileblockbylocation -u"
+   print "       dls-delete-fileblockbylocation -h"
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+   """
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+   print """Deletes all fileblocks for the given <location> in the DLS server.
+
+
+Specific notes for PhEDEx back-end (DLS_TYPE_PHEDEX):
+
+  This command cannot be used with a PhEDEx back-end.
+
+
+Specific notes for DBS back-end (DLS_TYPE_DBS):
+
+  This command cannot be used with a DBS back-end.
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+Options:
+
+   """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+
+   longoptions=["help", "usage", "verbose=", "endpoint=", "interface-type="]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'huv:e:i:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   rc = 0
+   verbose = 1
+   endpoint = None
+   iface_type = None
+   fname=""
+   for opt, val in optlist:
+     if opt in ("-h", "--help"):
+         help()
+         return 0
+
+     elif opt in ("-u", "--usage"):
+         usage()
+         return 0
+         
+     elif opt in ("-v", "--verbose"):
+         verbose = check_verbosity_value(val)
+         if(verbose == OPT_ERROR): return OPT_ERROR
+         
+     elif opt in ("-e","--endpoint"):
+         endpoint = val
+
+     elif opt in ("-i", "--interface-type"):
+         iface_type = val
+
+ 
+  
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+
+ # Build the arguments
+
+   if(len(args)<1):
+         msg = "Bad usage: Not enough input arguments"
+         err(msg)
+         usage()
+         return OPT_ERROR 
+   if(len(args)>1):
+         msg = "Bad usage: Too many input arguments"
+         err(msg)
+         usage()
+         return OPT_ERROR 
+
+
+   location = ""
+   for location in args:
+
+     # Create the interface binding
+     try: 
+        iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+     except dlsApi.DlsApiError, inst:
+        if(inst.rc):  rc = inst.rc 
+        else:           rc = GENERIC_ERROR
+        msg = "Error when binding the DLS interface: " + str(inst)
+        err(msg)
+        return rc
+   
+     # Start session
+     iface.startSession()
+     
+     if(verbose >= 2):
+       print "*** Get FileBlocks given the location=%s"%location
+     entryList=[]
+     try:
+       entryList=iface.getFileBlocks(location)
+     except dlsApi.DlsApiError, inst:
+       if(inst.rc):  rc = inst.rc 
+       else:           rc = GENERIC_ERROR 
+       msg = "Error in the DLS query: %s." % str(inst)
+       err(msg)
+       iface.endSession()
+       return rc
+       
+     if(verbose >= 2):
+        print "*** Delete all DLS entry with location=%s"%location
+     #Could just be: iface.delete(entryList)
+     #print entryList
+     for entry in entryList:
+        #print entry
+        try:
+          #print " delete %s"%entry
+          iface.delete([entry])
+        except dlsApi.DlsApiError, inst:
+          msg = "Error in deleting DLS entry: %s." % str(inst)
+          err(msg)
+          pass
+  
+     # end session
+     iface.endSession()
+
+
+    
+######################## SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

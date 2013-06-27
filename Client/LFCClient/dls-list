@@ -1,0 +1,401 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-list,v 1.18 2008/05/20 14:27:54 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $.
+# Antonio Delgado Peris. CIEMAT. CMS.
+# 
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry
+import dlsClient
+from dlsCommandsCommon import *
+import time
+import sys
+import getopt
+from stat import *
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC", "DLS_TYPE_MYSQL", "DLS_TYPE_DBS", "DLS_TYPE_PHEDEX"]
+
+
+################## GLOBAL CONSTANTS ########################
+THIS_YEAR = time.localtime()[0]
+
+
+######################### FUNCTIONS ########################
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-list [-v, -e, -r, ...] <fileblock>"
+   print "       dls-list [-v, -e, -r, ...] -f <listing_file>"
+   print "       dls-list -u"
+   print "       dls-list -h"
+
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+   -l, --long
+   -r, --recursive
+   -g, --guid
+   -f, --from-file <filename>
+       --dbs-conf <conf_file>
+   """
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+   print """Prints FileBlocks information of the specified FileBlock
+or, for DLS implementations with hierarchical FileBlock namespace, 
+of FileBlocks in the specified FileBlock namespace directory.
+
+
+Specific notes for DBS and PhEDEx back-end (DLS_TYPE_DBS, DLS_TYPE_PHEDEX):
+
+  DBS and PhEDEx FileBlock namespace is flat, and so there are no directories.
+  The argument of this command will be taken as a FileBlock pattern (with
+  '*' as wildcard), and information regarding the matching FileBlocks will be
+  returned. If only "/"  is specified, this will be interpreted as "list the
+  whole catalog". The "-r" option is ignored.
+
+  The "-g" option is ignored.
+
+  The FileBlock attributes printed will be those provided in the server's
+  reply.
+
+  The server endpoint is got from a string in the URL form, usually:
+    "http[s]://hname[:port]/path/to/DLS".
+  This endpoint is retrieved from several sources (in order of precedence):   
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+     - (DBS only) specified URL in the configuration file (see --dbs-conf)
+     - (PhEDEx only) DLS_PHEDEX_ENDPOINT environmental variable
+
+
+Additional notes for DBS back-end (DLS_TYPE_DBS):
+
+  Apart from DBS endpoint, other configuration options may be specified
+  for the underlying DBS interface (e.g. "level" for DBS logging level)
+  in a configuration file. The name of this file can be indicated with,
+  in this order:
+     - specified value for --dbs-conf option
+     - DBS_CLIENT_CONFIG environmental variable
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  LFC implements a hierarchical FileBlock namespace. The argument of this
+  command will be taken as a directory in that namespace, and information
+  regarding its containing FileBlocks will be printed.
+
+  The "-r" option makes the listing recursive. That is, the command will print
+  also the contents of the subdirectories of under the specified directory.
+  
+   NOTE: Be aware that the recursive listing of LFC is a very costly operation
+   and may affect DLS response, so please use this flag only with care!!
+
+  Currently, printed attributes are:
+  filemode, number of files in a directory, owner, group owner and last
+  modification date.
+   
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+Options:
+If "-l" is specified, some FileBlock attributes are printed before the
+FileBlock name. Printed attributes may depend on the DLS implementation.
+
+If "-r" is specified, recursive listing is performed.
+    
+The use of "-g" will cause the printing of the FileBlock unique identifier
+(GUID).
+
+The "-f" option can be used to retrieve FileBlock names from a file rather
+than from the given arguments. The file must contain one line per FileBlock
+to be listed.
+ """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+
+def showFileBlocks(iface, lineList, longList, recursive, guid, iface_type, verbose):
+   """
+   Prints the specified FileBlocks information. lineList is a list
+   of string, each holding a FileBlock name.
+    
+   If longList is True, some attributes are also printed.
+   Currently printed attributes are:
+   filemode, number of files in a directory, owner, group owner, last
+   modification date.
+   
+   Throws DlsApiError if there is a problem in the DLS operation.
+   """
+   more = longList or guid
+   fbList = []
+   for line in lineList:
+
+      # Split
+      line = (line.strip()).split()
+      if(not line):
+         continue
+
+      # Get LFN
+      lfn = line.pop(0)
+
+      # Store all the FileBlocks 
+      fbList.append(lfn)
+
+   if(verbose >= 2):
+      print "--DlsApi.listFileBlocks(",
+      for i in fbList: print i, ";",
+      print ")"
+
+   # Get the locations (and let the caller deal with the exception...)
+   if(len(fbList) == 1):
+      # Need this for the directory listing (if in a list is like ls -d)
+      resList = iface.listFileBlocks(fbList[0], longList=more, recursive=recursive, session=True)
+   else:
+      resList = iface.listFileBlocks(fbList, longList=more, recursive=recursive, session=True)
+
+   # Make sure the obtained result is a list
+   if(not isinstance(resList, list)):
+     resList = [resList]
+
+   # Print the entries
+   for fB in resList:
+      if(iface_type=="DLS_TYPE_LFC" and longList):
+         values = []
+         for i in ["filemode", "nlink", "uid", "gid", "filesize", "mtime"]:
+            try:
+                values.append(fB.attribs[i])
+            except KeyError, inst:
+                values.append("UNKNOWN")
+
+         # Interpret the filemode to print it as a string
+         if(not (values[0] == "UNKNOWN")):
+            modestr = [""] * 10
+            if (values[0] & S_IFDIR):
+               modestr[0] = 'd'
+            else:
+               if ((values[0] & S_IFLNK) == S_IFLNK):
+                  modestr[0] = 'l';
+               else:
+                  modestr[0] = '-';
+            if (values[0] & S_IRUSR):  modestr[1] = 'r'
+            else:                      modestr[1] = '-'
+            if (values[0] & S_IWUSR):  modestr[2] = 'w'
+            else:                      modestr[2] = '-'
+            if (values[0] & S_IXUSR):
+               if (values[0] & S_ISUID):
+                  modestr[3] = 's'
+               else:
+                  modestr[3] = 'x'
+            else:
+               modestr[3] = '-'
+            if (values[0] & S_IRGRP):  modestr[4] = 'r'
+            else:                      modestr[4] = '-'
+            if (values[0] & S_IWGRP):  modestr[5] = 'w'
+            else:                      modestr[5] = '-'
+            if (values[0] & S_IXGRP):
+               if (values[0] & S_ISGID):
+                  modestr[6] = 's'
+               else:
+                  modestr[6] = 'x'
+            else:
+               modestr[6] = '-'
+            if (values[0] & S_IROTH):  modestr[7] = 'r'
+            else:                      modestr[7] = '-'
+            if (values[0] & S_IWOTH):  modestr[8] = 'w'
+            else:                      modestr[8] = '-'
+            if (values[0] & S_IXOTH):
+               if (values[0] & S_ISVTX):
+                  modestr[9] = 't'
+               else:
+                  modestr[9] = 'x'
+            else:
+               modestr[9] = '-'
+
+            values[0] = ""
+            for char in modestr:
+               values[0] += char
+
+         print str(values[0]) + "\t" + str(values[1]),
+         print str(values[2]) + "\t" + str(values[3]) + "\t" + str(values[4]) + "\t",
+
+         # Format the time 
+         if(not (values[5] == "UNKNOWN")):
+            time_tuple = time.localtime(fB.attribs["mtime"])
+            if(time_tuple[0] != THIS_YEAR):
+               fmt = "%b %d %Y"
+            else:
+               fmt = "%b %d %H:%M"
+            print '\t', time.strftime(fmt, time_tuple), '\t',
+         else:
+            print '\t', values[5], '\t',
+      
+#      # In any case, print the name 
+#      print fB.name,
+
+      if (not longList) or (iface_type=="DLS_TYPE_LFC"):
+         print fB.name,
+      else:
+         print fB,
+
+#      if(iface_type != "DLS_TYPE_LFC" and longList):
+#         print fB.attribs,
+
+      if(guid):
+         print '\t',fB.getGuid(),
+
+      print         
+
+
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+ 
+   longoptions=["help", "usage", "long", "recursive", "endpoint=", "interface-type=",\
+                "verbose=", "guid", "from-file=", "dbs-conf="]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'hulre:i:v:gf:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   rc = 0
+   longList = False
+   recursive = False
+   dbsConf = None
+   verbose = 1
+   endpoint = None
+   iface_type = None
+   guid = False
+   fromFile = False
+   fname=""
+   for opt, val in optlist:
+       if opt in ("-h", "--help"):
+           help()
+           return 0
+
+       elif opt in ("-u", "--usage"):
+           usage()
+           return 0
+           
+       elif opt in ("-l", "--long"):
+           longList = True
+           
+       elif opt in ("-r", "--recursive"):
+           recursive = True
+           
+       elif opt in ("-g", "--guid"):
+           guid = True           
+           
+       elif opt in ("", "--dbs-conf"):
+           dbsConf = val
+
+       elif opt in ("-e","--endpoint"):
+           endpoint = val
+
+       elif opt in ("-i", "--interface-type"):
+           iface_type = val
+
+       elif opt in ("-v", "--verbose"):
+           verbose = check_verbosity_value(val)
+           if(verbose == OPT_ERROR): return OPT_ERROR
+
+       elif opt in ("-f","--from-file"):
+           fromFile = True
+           fname = val
+           
+  
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+ # Build the arguments
+
+   # From file
+   if(fromFile):
+      try:
+         file=open(fname, 'r')
+      except IOError, inst:
+         msg="The file "+fname+" could not be opened: "+str(inst)
+         err(msg)
+         return FILE_ERROR
+      lineList=file.readlines()
+      file.close()
+      
+   # From command line options
+   else:
+      if(len(args)<1):
+         err("Not enough input arguments")
+         usage()
+         return(OPT_ERROR)
+
+      line=""
+      for token in args:
+         line += token +" "
+      lineList = [line]
+
+ # Create the interface binding
+   try: 
+      iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+   except dlsApi.DlsApiError, inst:
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error when binding the DLS interface: " + str(inst)
+      err(msg)
+      return rc
+   
+ # Do the query
+   try:
+     showFileBlocks(iface, lineList, longList, recursive, guid, iface_type, verbose)
+   except dlsApi.DlsApiError, inst:         
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error in the DLS query: %s." % str(inst)
+      err(msg)
+
+ # Finally, return error code
+   return rc
+
+
+
+######################### SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,291 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-replace-location,v 1.13 2008/05/20 14:27:54 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $
+# Alessandra Fanfani Univ./INFN Bologna. CMS.
+# 
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry, DlsDataObjectError
+import dlsClient
+from dlsCommandsCommon import *
+import sys
+import commands
+import getopt
+from time import localtime, mktime
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC", "DLS_TYPE_MYSQL", "DLS_TYPE_DBS"]
+
+
+#########################################
+# Constants 
+#########################################
+# Max duration of a transaction (in seconds)
+DLS_MAX_TRANS_TIME = 10.5
+
+
+# TODO: When custodial flag is there, before replacing location we need to think
+#       what we do in that case.
+
+
+######################### FUNCTIONS ########################
+
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-replace-location [-v, -e, -i, ...] -o <old_loc> -n <new_loc>"
+   print "       dls-replace-location -u"
+   print "       dls-replace-location -h"
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+       --skip-location-check
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+   -o, --oldlocation <oldlocation>
+   -n, --newlocation <newlocation>
+       --dbs-conf <conf_file>
+   """
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+
+   print """Replaces the location for all fileblocks for the given <oldlocation> to
+the given <newlocation> in the DLS server.
+
+
+Specific notes for PhEDEx back-end (DLS_TYPE_PHEDEX):
+
+  This command cannot be used with a PhEDEx back-end.
+
+
+Specific notes for DBS back-end (DLS_TYPE_DBS):
+
+  This operation is atomic, either the replacement is made for all fileblocks or
+  for none of them.
+
+  The server endpoint is got from a string in the URL form, usually:
+    "http[s]://hname[:port]/path/to/DLS".
+  This endpoint is retrieved from several sources (in order of precedence):   
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+     - specified URL in the configuration file (see --dbs-conf)
+
+  Apart from DBS endpoint, other configuration options may be specified for
+  the underlying DBS interface (e.g. "level" for DBS logging level) in a
+  configuration file. The name of this file can be indicated with,
+  in this order:
+     - specified value for --dbs-conf option
+     - DBS_CLIENT_CONFIG environmental variable
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  For LFC back-end, this operation is performed as an atomic operation (using
+  transactions), so either the whole replacement is performed or nothing is done.
+
+   NOTE: This operation is costly, and will take some time to complete.
+
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+Options:
+
+The "--skip-location-check" option can be used to skip the check of the new 
+location. If not used, the location hostname is checked for IP resolution
+in order to be accepted as valid location.
+
+   """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+
+   longoptions=["help", "usage", "verbose=", "endpoint=", "interface-type=", "oldlocation=",\
+                "newlocation=", "skip-location-check", "dbs-conf="]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'huv:e:i:o:n:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   rc = 0
+   dbsConf = None
+   verbose = 1
+   checkHost = True
+   endpoint = None
+   iface_type = None
+   oldlocation = None
+   newlocation = None
+   for opt, val in optlist:
+     if opt in ("-h", "--help"):
+         help()
+         return 0
+
+     elif opt in ("-u", "--usage"):
+         usage()
+         return 0
+         
+     elif opt in ("-v", "--verbose"):
+         verbose = check_verbosity_value(val)
+         if(verbose == OPT_ERROR): return OPT_ERROR
+         
+     elif opt in ("", "--skip-location-check"):
+         checkHost = False
+
+     elif opt in ("", "--dbs-conf"):
+         dbsConf = val
+
+     elif opt in ("-e","--endpoint"):
+         endpoint = val
+
+     elif opt in ("-i", "--interface-type"):
+           iface_type = val
+
+     elif opt in ("-o", "--oldlocation"):
+         oldlocation=val
+     elif opt in ("-n", "--newlocation"):
+         newlocation=val
+
+
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+   # Check other options
+   if oldlocation==None:
+      msg = "Error: --oldlocation <oldlocation> is required"
+      err(msg)
+      usage()
+      sys.exit(OPT_ERROR)
+   if newlocation==None:
+      msg = "Error: --newlocation <newlocation> is required"
+      err(msg)
+      usage()
+      sys.exit(OPT_ERROR)
+   if oldlocation == newlocation:
+      msg = "Error: <newlocation> (%s) and <oldlocation> (%s) are equal"%(oldlocation, newlocation)
+      err(msg)
+      sys.exit(OPT_ERROR)
+
+
+ # Build the object for new location
+   try:
+      newDlsLocation = DlsLocation(newlocation, checkHost = checkHost)
+   except DlsDataObjectError, inst:
+     msg = "Error preparing the DLS request: %s." % str(inst)
+     err(msg)
+     sys.exit(-2)  
+
+ # Create the interface binding
+   try: 
+      iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+   except dlsApi.DlsApiError, inst:
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error when binding the DLS interface: " + str(inst)
+      err(msg)
+      return rc
+  
+
+   # DBS: Atomic operation in API
+   if(iface_type == dlsClient.DLS_TYPE_DBS):
+      if(verbose>=2):
+         print "--DlsApi.changeFileBlocksLocation(%s, %s, checkLocations=%s)" % (oldlocation, newlocation, checkHost)
+      try:
+         iface.changeFileBlocksLocation(oldlocation, newlocation, checkLocations=checkHost)
+         return 0
+      except dlsApi.DlsApiError, inst:
+         msg = "Error replacing location for fileblocks: %s." % str(inst)
+         err(msg)
+         if(inst.rc):  rc = inst.rc 
+         else:         rc = GENERIC_ERROR
+         return rc  
+  
+
+   # Other interface types (LFC): non-atomic operation but with transactions
+   if(verbose >= 2):
+      print "*** Get FileBlocks given the location=%s"%oldlocation
+   entryList=[]
+   try:
+      entryList=iface.getFileBlocks(oldlocation, session=True)
+   except dlsApi.DlsApiError, inst:
+      msg = "Error in the DLS query: %s." % str(inst)
+      err(msg)
+      if(inst.rc):  rc = inst.rc 
+      else:         rc = GENERIC_ERROR
+      return rc  
+
+   if(verbose >= 2):
+      print "*** Add all DLS entries with location=%s"%newlocation
+      print "*** Delete all DLS entries with location=%s"%oldlocation
+     
+   newList = []
+   t0 = mktime(localtime())
+   iface.startTrans()
+   try:
+     # NOTE for LFC: Here we delete inside a transaction. This is dangerous and should
+     # be normally avoided! This particular case is known to behave correctly.
+     for oldEntry in entryList:
+        newEntry = DlsEntry(oldEntry.fileBlock,[newDlsLocation])
+        iface.add(newEntry, errorTolerant = False, checkLocations = False)
+        iface.delete(oldEntry, errorTolerant = False, keepFileBlock = True)
+        # Check time (each transaction should not be longer than DLS_MAX_TRANS_TIME)
+        t1 = mktime(localtime())
+        if((t1-t0)>DLS_MAX_TRANS_TIME):
+           iface.endTrans()
+           t0 = mktime(localtime())           
+           iface.startTrans()
+
+   except dlsApi.DlsApiError, inst:
+     msg = "Error in deleting DLS entry: %s." % str(inst)
+     msg += "\nPlease check for FileBlocks still in old location (maybe in new as well)."
+     msg += " If the error was temporary, running the command again may fix it."
+     if(inst.rc):  rc = inst.rc 
+     else:         rc = GENERIC_ERROR
+     err(msg)
+     iface.abortTrans()
+     sys.exit(err)  
+
+   iface.endTrans()
+
+######################### SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,248 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-get-all-locations,v 1.9 2009/09/21 13:05:38 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $.
+# Antonio Delgado Peris. CIEMAT. CMS.
+# 
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry
+import dlsClient
+from dlsCommandsCommon import *
+import time
+import sys
+import getopt
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC", "DLS_TYPE_MYSQL", "DLS_TYPE_DBS", "DLS_TYPE_PHEDEX"]
+
+
+################## GLOBAL CONSTANTS ########################
+THIS_YEAR = time.localtime()[0]
+
+
+######################### FUNCTIONS ########################
+
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-get-all-locations [-v, -e, -i, -l, -s, --dbs-conf]"
+   print "       dls-get-all-locations -u"
+   print "       dls-get-all-locations -h"
+
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -l, --long
+   -s, --sitename
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+       --dbs-conf <conf_file>
+   """
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+   print """Prints the locations holding any FileBlock replica, according
+to the DLS catalog. 
+
+
+Specific notes for DBS and PhEDEx back-end (DLS_TYPE_DBS, DLS_TYPE_PHEDEX):
+
+  The server endpoint is got from a string in the URL form, usually:
+    "http[s]://hname[:port]/path/to/DLS".
+  This endpoint is retrieved from several sources (in order of precedence):   
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+     - (DBS only) specified URL in the configuration file (see --dbs-conf)
+     - (PhEDEx only) DLS_PHEDEX_ENDPOINT environmental variable
+
+Additional notes for DBS back-end (DLS_TYPE_DBS):
+
+  Option -s will be ignored.
+
+  Apart from DBS endpoint, other configuration options may be specified
+  for the underlying DBS interface (e.g. "level" for DBS logging level)
+  in a configuration file. The name of this file can be indicated with,
+  in this order:
+     - specified value for --dbs-conf option
+     - DBS_CLIENT_CONFIG environmental variable
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  Option -s will be ignored.
+
+   NOTE: With LFC back-end, this method is a very expensive operation and may
+   affect DLS response, so use it only with care!!
+
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+Options:
+
+The "-l" option will cause some location attributes are printed after the SE name.
+Printed attributes depend on the DLS implementation.
+
+The "-s" option will cause (for those implementations supporting it) the printing
+of the CMS site name instead of the corresponding SE.
+ """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+
+def showLocations(iface, longList, showSite, verbose):
+   """
+    Prints all the locations which hold a copy of any FileBlock.
+    
+    Throws DlsApiError if there is a problem in the DLS operation.
+   """
+
+   # Get the list of FileBlocks
+
+   if(verbose >= 2):
+      print "--DlsApi.getAllLocations()"
+
+   # Get the locations (and let the caller deal with the exception...)
+   locList = iface.getAllLocations(session = True)
+
+   # Print the entries
+   def compFunc(a, b):
+       if a.host > b.host: return 1
+       if a.host < b.host: return -1
+       return 0
+   
+   locList.sort(compFunc)
+
+   if(longList):
+       for loc in locList:
+          print loc
+   else:
+       if showSite:
+           for loc in locList:
+               print loc.attribs['name']
+       else:
+           prev = ""
+           for loc in locList:
+              if loc.host != prev:
+                  print loc.host
+              prev = loc.host
+ 
+
+            
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+ 
+   longoptions=["help", "usage", "long", "sitename", "endpoint=", \
+                "interface-type=", "verbose=", "dbs-conf="]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'hulse:i:v:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   rc = 0
+   dbsConf = None
+   verbose = 1
+   endpoint = None
+   iface_type = None
+   longList = False
+   site = False
+   for opt, val in optlist:
+       if opt in ("-h", "--help"):
+           help()
+           return 0
+
+       elif opt in ("-u", "--usage"):
+           usage()
+           return 0
+           
+       elif opt in ("", "--dbs-conf"):
+           dbsConf = val
+
+       elif opt in ("-e","--endpoint"):
+           endpoint = val
+
+       elif opt in ("-i", "--interface-type"):
+           iface_type = val
+
+       elif opt in ("-l", "--long"):
+           longList = True
+           
+       elif opt in ("-s", "--sitename"):
+           site = True
+           
+       elif opt in ("-v", "--verbose"):
+           verbose = check_verbosity_value(val)
+           if(verbose == OPT_ERROR): return OPT_ERROR
+
+
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+  
+ # Create the interface binding
+   try: 
+      iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+   except dlsApi.DlsApiError, inst:
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error when binding the DLS interface: " + str(inst)
+      err(msg)
+      return rc
+
+   
+ # Do the query
+   try:
+     showLocations(iface, longList, site, verbose)
+   except dlsApi.DlsApiError, inst:         
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error in the DLS query: %s." % str(inst)
+      err(msg)
+
+
+ # Finally, return error code
+   return rc
+
+
+
+######################### SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

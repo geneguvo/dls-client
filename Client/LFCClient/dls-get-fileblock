@@ -1,0 +1,345 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-get-fileblock,v 1.17 2009/09/21 13:05:39 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $.
+# Antonio Delgado Peris. CIEMAT. CMS.
+# 
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry
+import dlsClient
+from dlsCommandsCommon import *
+import time
+import sys
+import commands
+import getopt
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC", "DLS_TYPE_MYSQL", "DLS_TYPE_DBS", "DLS_TYPE_PHEDEX"]
+
+
+################## GLOBAL CONSTANTS ########################
+THIS_YEAR = time.localtime()[0]
+
+
+######################### FUNCTIONS ########################
+
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-get-fileblock [options] <location>"
+   print "       dls-get-fileblock [options] -f <listing_file>"
+   print "       dls-get-fileblock -u"
+   print "       dls-get-fileblock -h"
+
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+   -s, --sitename
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+   -f, --from-file <filename>
+       --dbs-conf <conf_file>
+       --show-prod
+       --show-caf
+       --only-subscribed
+       --only-custodial
+   """
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+   print """This script will print the FileBlock entries that are associated with the
+specified location (i.e., there is a copy of that FileBlock in that location (SE)).
+
+Specific notes for DBS and PhEDEx back-end (DLS_TYPE_DBS, DLS_TYPE_PHEDEX):
+
+  The argument of this command is the Storage Element host name (unless -s 
+  option is used with the DLS_TYPE_PHEDEX implementation).
+
+  The server endpoint is got from a string in the URL form, usually:
+    "http[s]://hname[:port]/path/to/DLS".
+  This endpoint is retrieved from several sources (in order of precedence):   
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+     - (DBS only) specified URL in the configuration file (see --dbs-conf)
+     - (PhEDEx only) DLS_PHEDEX_ENDPOINT environmental variable
+
+  The --show-prod option can be used to turn off the filtering of
+  prod-only FileBlock replicas. Use it only if you know what you are doing.
+
+
+Additional DLS_TYPE_PHEDEX notes:
+
+  The --show-caf option can be used to turn off the filtering of CAF replicas.
+
+  The --only-subscribed option can be used to turn on filtering of
+unsubscribed replicas.
+
+  The --only-custodial option can be used to turn on the filtering of
+non-custodial replicas.
+
+
+Additional DLS_TYPE_DBS notes:
+
+  The argument of this command will be taken as a Storage Element host name
+  pattern (with '*' as wildcard). All the Fileblocks associated with the
+  matching SEs will be returned.
+
+  Option -s will be ignored.
+
+  Apart from DBS endpoint, other configuration options may be specified for
+  the underlying DBS interface (e.g. "level" for DBS logging level) in a
+  configuration file. The name of this file can be indicated with,
+  in this order:
+     - specified value for --dbs-conf option
+     - DBS_CLIENT_CONFIG environmental variable
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  The argument of this command is the Storage Element host name.
+
+  Option -s will be ignored.
+
+   NOTE: Depending on the implementation, this method may be a very expensive
+   operation and affect DLS response, so use it only with care!!
+
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+Options:
+
+The "-s" option will cause (for those implementations supporting it) the
+location arguments will be considered to be CMS site name instead of the
+corresponding SE host names.
+
+The "-f" option can be used to retrieve locations from a file rather than from the
+given arguments. The file must contain one line per SE to be listed.
+
+The --show-prod option is only understood by the PhEDEx and DBS back-ends
+and ignored by the rest. The --show-caf, --only-subscribed and 
+--only-custodial options are only understood by the PhEDEx back-end.
+See relevant notes.
+   """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+
+def showFileBlocks(iface, lineList, askForSite, showProd, showCAF, subscribed,\
+                   custodial, verbose):
+   """
+    Prints the FileBlocks that are stored in the specified location.
+    lineList is a list of strings, each holding a location host. 
+    
+    Throws DlsApiError if there is a problem in the DLS operation.
+   """
+
+   locList = []
+   for line in lineList:
+
+      # Split
+      line = (line.strip()).split()
+      if(not line):
+         continue
+
+      # Get location
+      host = line.pop(0)
+
+      # Store all the FileBlocks 
+      locList.append(host)
+
+   if(verbose >= 2):
+      print "--DlsApi.getFileBlocks(",
+      for i in locList: print i, ";",
+      print ")"
+
+   # Get the FileBlocks (and let the caller deal with the exception...)
+   entryList = iface.getFileBlocks(locList, session = True, showProd = showProd,\
+                    showCAF = showCAF, cmsSite = askForSite, subscribed = \
+                    subscribed, custodial = custodial)
+
+
+
+   # Extract the locations returned
+   locsDict = {}
+   for entry in entryList:
+      for loc in entry.locations:
+         if askForSite:
+            mykey = loc.attribs['node']
+         else:
+            mykey = loc.host
+         if(locsDict.has_key(mykey)):
+            locsDict[mykey].append(entry.fileBlock.name)
+         else:
+            locsDict[mykey] = [entry.fileBlock.name]
+   
+   # Do we print the header? Always, unless we asked for 1, and without patterns.
+   with_heathers = (len(locList) > 1) or (len(locsDict.keys()) > 1) or (locsDict.keys() != locList)
+   
+   # Print the list   
+   for loc in locsDict.keys():
+      if(with_heathers):
+         print "  Location: " + loc 
+      for block in locsDict[loc]:
+         print block
+
+            
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+ 
+   longoptions=["help", "usage", "endpoint=", "interface-type=", "verbose=",\
+                "sitename", "from-file=", "dbs-conf=", "show-prod", "show-caf",\
+                "only-subscribed", "only-custodial"]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'hue:i:v:sf:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   rc = 0
+   dbsConf = None
+   verbose = 1
+   endpoint = None
+   iface_type = None
+   showProd = False
+   showCAF = False
+   subscribed = False
+   custodial = False
+   fromFile = False
+   site = False
+   fname=""
+   for opt, val in optlist:
+       if opt in ("-h", "--help"):
+           help()
+           return 0
+
+       elif opt in ("-u", "--usage"):
+           usage()
+           return 0
+           
+       elif opt in ("", "--dbs-conf"):
+           dbsConf = val
+
+       elif opt in ("", "--show-prod"):
+           showProd = True
+
+       elif opt in ("", "--show-caf"):
+           showCAF = True
+           
+       elif opt in ("", "--only-subscribed"):
+           subscribed = True
+
+       elif opt in ("", "--only-custodial"):
+           custodial = True
+
+       elif opt in ("-s", "--sitename"):
+           site = True
+
+       elif opt in ("-e","--endpoint"):
+           endpoint = val
+
+       elif opt in ("-i", "--interface-type"):
+           iface_type = val
+
+       elif opt in ("-v", "--verbose"):
+           verbose = check_verbosity_value(val)
+           if(verbose == OPT_ERROR): return OPT_ERROR
+
+       elif opt in ("-f","--from-file"):
+           fromFile = True
+           fname = val
+
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+
+ # Build the arguments
+
+   # From file
+   if(fromFile):
+      try:
+         file = open(fname, 'r')
+      except IOError, inst:
+         msg="The file "+fname+" could not be opened: "+str(inst)
+         err(msg)
+         return FILE_ERROR
+      lineList=file.readlines()
+      file.close()
+      
+   # From command line options
+   else:
+      if(len(args)<1):
+         err("Not enough input arguments")
+         usage()
+         return(OPT_ERROR)
+
+      line=""
+      for token in args:
+         line += token +" "
+      lineList = [line]
+
+ # Create the interface binding
+   try: 
+      iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+   except dlsApi.DlsApiError, inst:
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error when binding the DLS interface: " + str(inst)
+      err(msg)
+      return rc
+   
+ # Do the query (under session)
+   try:
+     showFileBlocks(iface, lineList, site, showProd, showCAF, \
+                    subscribed, custodial, verbose)
+   except dlsApi.DlsApiError, inst:         
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error in the DLS query: %s." % str(inst)
+      err(msg)
+
+ # Finally, return error code
+   return rc
+
+
+
+######################### SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

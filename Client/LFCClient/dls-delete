@@ -1,0 +1,365 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-delete,v 1.15 2008/05/20 14:27:54 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $.
+# Antonio Delgado Peris. CIEMAT. CMS.
+# 
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry, DlsDataObjectError
+import dlsClient
+from dlsCommandsCommon import *
+import sys
+import commands
+import getopt
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC", "DLS_TYPE_MYSQL", "DLS_TYPE_DBS"]
+
+
+######################### FUNCTIONS ########################
+
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-delete [-v, -k | -l, -x, ...]    <fileblock> <SE_1> [<SE_2> ..]"
+   print "       dls-delete [-v, -k | -l, -x, ...] -a <fileblock>"
+   print "       dls-delete [-v, -k | -l, -x, ...] -f <listing_file>"
+   print "       dls-delete -u"
+   print "       dls-delete -h"
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+   -a, --all
+   -l, --remove-links  --- NOT YET IMPLEMENTED
+   -k, --keepFileBlock
+   -x, --force
+   -f, --from-file <filename>
+       --not-error-tolerant
+       --dbs-conf <conf_file>
+   """
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+   print """Deletes the specified non-custodial locations (located in <SE_1>
+<SE_2> ..) for the given <fileblock> FileBlock in the DLS server.
+
+If custodial locations exist, they are not deleted unless "--force" is
+specified. If the "-a" option is specified (no location must then be specified),
+all the locations are removed.
+
+
+Specific notes for PhEDEx back-end (DLS_TYPE_PHEDEX):
+
+  This command cannot be used with a PhEDEx back-end.
+
+
+Specific notes for DBS back-end (DLS_TYPE_DBS):
+
+  For the DBS back-end implementation, the DLS interface cannot be used to
+  delete FileBlocks, and so only locations associated to those FileBlocks may
+  be removed. The "-k" option is silently ignored.
+  
+  Currently, DBS holds no custodial replicas, since there are no replica
+  attributes yet. The "--force" option is at this point superfluous.
+
+  The server endpoint is got from a string in the URL form, usually:
+    "http[s]://hname[:port]/path/to/DLS".
+  This endpoint is retrieved from several sources (in order of precedence):   
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+     - specified URL in the configuration file (see --dbs-conf)
+
+  Apart from DBS endpoint, other configuration options may be specified for
+  the underlying DBS interface (e.g. "level" for DBS logging level) in a
+  configuration file. The name of this file can be indicated with,
+  in this order:
+     - specified value for --dbs-conf option
+     - DBS_CLIENT_CONFIG environmental variable
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  LFC support custodial replicas (with attribute f_type = "P). They will not
+  be removed unless "--force" is used.
+
+  If the last location associated with a Fileblock is deleted, the FileBlock
+  itself is also removed, unless --keepFileBlock is used.
+
+  LFC implements a hierarchical FileBlock namespace. If the "-a" option is
+  used, the command will also delete empty directories in the hierarchy.
+  Non empty directories will refuse to be removed.
+
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+Options:
+
+The "-k" option indicates that the FileBlock should not be removed, even if
+all its associated locations have been removed.
+
+The "-l" option is currently not implemented. It should deal with symlinks
+removal for LFC back-ends.
+
+The "-f" option can be used to specify fileblocks and SEs in a file rather than in
+the arguments. The file must contain one fileblock per line, with the list of the SE
+of the replicas to be removed in the same line and separated by whitespaces. In this
+case, the "-k", "-l" and "--force" options have the same meaning as before and affect
+all fileblocks in <listfile>.
+
+ATTENTION: The "-a" option cannot be specified together with "-f", but if in a line
+of <listfile> no replica is specified with the fileblock, then the functionality of
+the"-a" option is assumed for that line and all replicas are removed. 
+
+The "not-error-tolerant" option will cause the command to break on first error
+deleting a FileBlock or location. Otherwise (default), after a failure in one
+replica, the tool tries to go on with next locations (and FileBlocks).
+
+The "--dbs-conf" option can be used to specify a configuration file for the
+DBS interface.
+   """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+def deleteEntries(iface, lineList, keepFileBlock, removeLinks, force, errorTolerant, verbose):
+   """
+    Tries to delete the specified locations of the specified FileBlocks 
+    (or all the locations for those FileBlocks for which there are no 
+    locations specified).
+    
+    lineList is a list of strings. In each string the first element is a
+    FileBlock name and the rest (separated by whitespaces) are the
+    corresponding locations for that FileBlock.
+
+    The format of a line is then:
+    <lfn> [<se1> <se2> ..]
+    All elements separated by whitespaces.
+
+    Throws DlsApiError if there is a problem in the DLS operation.
+   """
+
+   entryList = []
+   fbList = []
+
+   for line in lineList:
+      # Split
+      line = (line.strip()).split()
+
+      # FileBlock
+      lfn = line.pop(0)
+      fB = DlsFileBlock(lfn)
+
+      # Build the arguments...
+      all = False
+      if(not line): all = True
+      locList = []
+      for loc in line:
+         locList.append(DlsLocation(loc))
+      entry = DlsEntry(fB, locList)
+      
+      # And just let the API do everything 
+      if(verbose >= 2):
+         print "--DlsApi.delete(%s, all=%s, force=%s, keepFileBlock=%s, removeLinks=%s)"\
+               % (str(entry), str(all), str(force), str(keepFileBlock), str(removeLinks))
+               
+      iface.delete(entry, force = force, all = all, keepFileBlock = keepFileBlock,\
+                   removeLinks=removeLinks, session = False, errorTolerant = errorTolerant)
+
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+   longoptions=["help", "usage", "verbose=", "endpoint=", "interface-type=", "all",\
+        "remove-links", "keepFileBlock", "force", "from-file=", "dbs-conf=", "not-error-tolerant"]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'huv:e:i:alkxf:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   rc = 0
+   all = False
+   removeLinks = False
+   keepFileBlock = False
+   force = False
+   errorTolerant = True
+   dbsConf = None
+   verbose = 1
+   endpoint = None
+   iface_type = None
+   fromFile = False
+   fname=""
+
+   for opt, val in optlist:
+     if opt in ("-h", "--help"):
+         help()
+         return 0
+
+     elif opt in ("-u", "--usage"):
+         usage()
+         return 0
+
+     elif opt in ("", "--not-error-tolerant"):
+         errorTolerant = False
+         
+     elif opt in ("", "--dbs-conf"):
+           dbsConf = val
+
+     elif opt in ("-e","--endpoint"):
+         endpoint = val
+
+     elif opt in ("-i", "--interface-type"):
+         iface_type = val
+
+     elif opt in ("-a", "--all"):
+         if(fromFile):
+            err("Bad usage: The -a and -f options are incompatible")
+            usage()
+            return OPT_ERROR
+         all = True
+         
+     elif opt in ("-l", "--remove-links"):       
+         if(keepFileBlock):
+            err("Bad usage: The -k and -l options are incompatible")
+            usage()
+            return OPT_ERROR
+         removeLinks = True
+         
+     elif opt in ("-k", "--keepFileBlock"):
+         if(removeLinks):
+            err("Bad usage: The -k and -l options are incompatible")
+            usage()
+            return OPT_ERROR
+         keepFileBlock = True
+         
+     elif opt in ("-x", "--force"):
+         force = True
+         
+     elif opt in ("-v", "--verbose"):
+         verbose = check_verbosity_value(val)
+         if(verbose == OPT_ERROR): return OPT_ERROR
+         
+     elif opt in ("-f","--from-file"):
+         if(all):
+            err("Bad usage: The -a and -f options are incompatible")
+            usage()
+            return OPT_ERROR 
+         fromFile = True
+         fname = val
+
+#   if(removeLinks):
+#       if (not (all or fromFile)):
+#          msg = "Bad usage: The -l option can only be specified together with -a or -f"
+#          err(msg)
+#          usage()
+#          return OPT_ERROR
+ 
+  
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+
+ # Build the arguments
+
+   # From file
+   if(fromFile):
+      try:
+         file=open(fname, 'r')
+      except IOError, inst:
+         msg="The file "+fname+" could not be opened: "+str(inst)
+         err(msg)
+         return FILE_ERROR
+      lineList=file.readlines()
+      file.close()
+      
+   # From command line options
+   else:
+      if(len(args)<1):
+         print "Bad usage: Not enough input arguments"
+         usage()
+         return OPT_ERROR 
+      if(len(args)<2):
+         if(not all):
+            print "Bad usage: Not enough input arguments (either -a is used, or a SE is specified)"
+            usage()
+            return OPT_ERROR 
+      else:
+         if(all):
+            err("Bad usage: The -a option is incompatible with a SE argument")
+            usage()
+            return OPT_ERROR 
+            
+      line = ""
+      for token in args:
+         line += token + " "
+      lineList = [line]
+
+
+ # Create the interface binding
+   try: 
+      iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+   except dlsApi.DlsApiError, inst:
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error when binding the DLS interface: " + str(inst)
+      err(msg)
+      return rc
+
+      
+ # Do the deletion (under session)
+   try:
+     iface.startSession()
+     session = True
+     deleteEntries(iface, lineList, keepFileBlock, removeLinks, force, errorTolerant, verbose)
+   except dlsApi.DlsApiError, inst:         
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR      
+      msg = "Error in the entry(ies) deletion: %s." % str(inst)
+      err(msg)
+      if(session): iface.endSession()
+
+ # Finally, return error code
+   return rc
+
+
+
+######################### SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

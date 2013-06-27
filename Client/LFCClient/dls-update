@@ -1,0 +1,310 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-update,v 1.13 2008/05/20 14:27:54 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $.
+# Antonio Delgado Peris. CIEMAT. CMS.
+# 
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry, DlsDataObjectError
+import dlsClient
+from dlsCommandsCommon import *
+import sys
+import commands
+import getopt
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC"]
+
+
+######################### FUNCTIONS ########################
+
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-update [-v, -t, ...] <fileblock> [attr=val ..] [<SE> [attr=val ..] ..]"
+   print "       dls-update [-v, -t, ...] -f <listing_file>"
+   print "       dls-update -u"
+   print "       dls-update -h"
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+   -t, --transaction
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+   -f, --from-file <filename>
+       --not-error-tolerant
+   """
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+   print """Updates the attributes of a FileBlock (or one its associated locations,
+if the corresponding SE is specified) in the DLS server. Attibutes must be specified
+in a key=val format, and only known attributes will be considered.
+
+
+Specific notes for PhEDEx back-end (DLS_TYPE_PHEDEX):
+
+  This command cannot be used with a PhEDEx back-end.
+
+
+Specific notes for DBS back-end (DLS_TYPE_DBS):
+
+  This command cannot be used with a DBS back-end.
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  Understood FileBlock attributes are:    
+    filesize, csumtype, csumvalue
+
+  Understood location attributes are:    
+    ptime, atime
+
+  If atime=xxx is specified, the value for the attribute will not be taken into account,
+  but the access time of the location will be updated to present time.
+ 
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+The "-f" option can be used to retrieve FileBlock names from a file rather than from the
+given arguments. The file must contain one line per FileBlock to be added, with the
+optional SE and attributes in the same line and separated by whitespaces.
+
+The "not-error-tolerant" option will cause the command to break on first error
+adding a FileBlock or location. Otherwise (default), after a failure in one
+replica, the tool tries to go on with next locations (and FileBlocks).
+For DLS_TYPE_LFC, the option is assumed if "-t" is used.
+
+The "-t" option indicates whether transactions should be used. If used, any error
+in an operation provokes a stop (no more additions) and a rollback of the previous
+operations. For DLS_TYPE_LFC, "-t" implies "not-error-tolerant".
+
+ NOTE: It is not recommended to maintain a transaction for too long (~10 seconds).
+ Thus, it is suggested not to include too many FileBlock in a <listfile> if
+ transactions are to be used. For a larger number of FileBlocks, please split them
+ into several invocations of the command.
+   """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+
+def updateEntries(iface, lineList, trans, errorTolerant, verbose):
+   """
+    Tries to update the attributes of the specified FileBlocks and locations for
+    each of the lines  in lineList. These lines are strings containing information
+    regarding the FileBlock name (LFN), its attributes, and possibly several SEs
+    where a location is located and the attributes for them. 
+
+    The format of a line is then:
+    <lfn> [attr_lfn_1=val ..] [<se1> [attr_se1_1=val ..] ..]
+
+    All elements separated by whitespaces, and attributes identified by the presence
+    of the '=' character.
+
+    Throws DlsApiError if there is a problem in the DLS operation, unless
+    trans is set to True.
+   """
+
+   entryList = []
+
+   for line in lineList:
+
+      # Split
+      line = (line.strip()).split()
+      if(not line):
+         continue
+
+      # First is LFN
+      lfn = line.pop(0)
+      entry = DlsEntry(DlsFileBlock(lfn)) 
+
+      # Then the LFN's attributes (key=val)
+      attrDict = {}
+      while(line):
+         token=line[0]
+         pos = token.find('=')
+         if( pos == -1):
+            break
+         else:
+            line.pop(0)
+            attrDict[token[:pos]] = token[(pos+1):]            
+      entry.fileBlock.attribs = attrDict
+
+      # Then the SEs
+      attrDict = {}      
+      se = ''
+      for token in line:
+         pos = token.find('=')
+         if( pos == -1):
+            if(se):
+               loc = DlsLocation(se)
+               loc.attribs = attrDict
+               entry.locations.append(loc)
+            se = token
+            attrDict = {}
+         else:
+            attrDict[token[:pos]] = token[(pos+1):]
+            
+      # And the last one (that is left...)
+      if(se):
+         entry.locations.append(DlsLocation(se, attrDict))
+
+      # Store all the entries
+      entryList.append(entry)
+
+   if(verbose >= 2):
+      print "--DlsApi.update(",
+      for i in entryList: print i, ";",
+      print ")"
+
+   if(trans): errorTolerant = False
+   # Finally, do the update (and let the caller deal with the exception...)
+   iface.update(entryList,  trans = trans, session = not trans, errorTolerant = errorTolerant)
+
+            
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+ 
+   longoptions=["help", "usage", "transaction", "endpoint=", "interface-type=", "verbose=",\
+                "from-file=", "not-error-tolerant"]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'hute:i:v:f:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   dbsConf = None
+   rc = 0
+   trans = False
+   errorTolerant = True
+   verbose = 1
+   endpoint = None
+   iface_type = None
+   fromFile = False
+   fname=""
+   for opt, val in optlist:
+       if opt in ("-h", "--help"):
+           help()
+           return 0
+
+       elif opt in ("-u", "--usage"):
+           usage()
+           return 0
+           
+       elif opt in ("-t", "--transaction"):
+           trans = True
+
+       elif opt in ("", "--not-error-tolerant"):
+           errorTolerant = False
+
+       elif opt in ("-e","--endpoint"):
+           endpoint = val
+
+       elif opt in ("-i", "--interface-type"):
+           iface_type = val
+
+       elif opt in ("-v", "--verbose"):
+           verbose = check_verbosity_value(val)
+           if(verbose == OPT_ERROR): return OPT_ERROR
+
+       elif opt in ("-f","--from-file"):
+           fromFile = True
+           fname = val
+
+
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+ # Build the arguments 
+
+   # From file
+   if(fromFile):
+      try:
+         file = open(fname, 'r')
+      except IOError, inst:
+         msg="The file "+fname+" could not be opened: "+str(inst)
+         err(msg)
+         return FILE_ERROR
+      lineList = file.readlines()
+      file.close()
+      
+   # From command line options
+   else:
+      if(len(args)<1):
+         err("Not enough input arguments")
+         usage()
+         return(OPT_ERROR)
+         
+      line=""
+      for token in args:
+         line += token +" "
+      lineList = [line]
+
+
+   # Create the interface binding
+   try: 
+      iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+   except dlsApi.DlsApiError, inst:
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error when binding the DLS interface: " + str(inst)
+      err(msg)
+      return rc
+
+      
+   # Do the update (under session/transaction)
+   try:
+     updateEntries(iface, lineList, trans, errorTolerant, verbose)
+   except dlsApi.DlsApiError, inst:         
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error in the entry(ies) update: %s." % str(inst)
+      err(msg)
+
+
+ # Finally, return error code
+   return rc
+
+
+
+######################### SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

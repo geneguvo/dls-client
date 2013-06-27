@@ -1,0 +1,408 @@
+#!/usr/bin/env python
+
+#
+# $Id: dls-add,v 1.19 2008/05/20 14:27:54 delgadop Exp $
+#
+# DLS Client. $Name: DLS_1_1_3 $.
+# Antonio Delgado Peris. CIEMAT. CMS.
+# 
+
+#########################################
+# Imports 
+#########################################
+import dlsApi
+from dlsDataObjects import DlsLocation, DlsFileBlock, DlsEntry, DlsDataObjectError
+import dlsClient
+from dlsCommandsCommon import *
+import sys
+import commands
+import getopt
+
+ADMITTED_IFACE_TYPES = ["DLS_TYPE_LFC", "DLS_TYPE_MYSQL", "DLS_TYPE_DBS"]
+
+
+######################### FUNCTIONS ########################
+
+def usage():
+   """
+    Provides usage information
+   """
+   print "Usage: dls-add [-v, -t, -e, -i, ...] <fileblock> [attr=val ..] [<SE> [attr=val ..] ..]"
+   print "       dls-add [-v, -t, -e, -i, ...] -f <listing_file>"
+   print "       dls-add -u"
+   print "       dls-add -h"
+
+def options():
+   """
+    Provides some information regarding the available options
+   """
+   print """Options summary:
+   -h, --help
+   -u, --usage
+   -v, --verbose <verb_level>
+   -t, --transaction
+   -e, --endpoint <endpoint>
+   -i, --interface-type <iface_type>
+   -f, --from-file <filename>
+       --skip-location-check
+       --allow-empty-blocks
+       --not-error-tolerant
+       --dbs-conf <conf_file>
+   """
+
+def example():
+  """
+   Provides with an example of correct use of the script
+  """
+  print """
+  """
+
+def help():
+   """
+    Provides some help information
+   """
+   print """Creates a FileBlock in the DLS server and associates the specified
+locations (SEs) with it. If the FileBlock already exists, then it just adds the
+specified locations.
+
+FileBlock attributes can be specified after the FileBlock name (and before any
+location), and are identified by the '=' sign joining key and value for each
+attribute (there must be no spaces between them). Likewise, location attributes
+can be specified after each given location. Unknown attribute names (keys)
+will be ignored.
+
+
+Specific notes for PhEDEx back-end (DLS_TYPE_PHEDEX):
+
+  This command cannot be used with a PhEDEx back-end.
+
+
+Specific notes for DBS back-end (DLS_TYPE_DBS):
+
+  For the DBS back-end implementation, FileBlocks must have been created
+  previously by other means, so this command will only add new locations for
+  existing FileBlocks (otherwise, it will return on error). This command cannot
+  create or modify FileBlocks in DBS. Accordingly, FileBlock attributes will
+  be ignored.
+
+  There are no replica attributes supported yet.
+
+  Transactions are also not supported. Related options are ignored.
+
+  The server endpoint is got from a string in the URL form, usually:
+    "http[s]://hname[:port]/path/to/DLS".
+  This endpoint is retrieved from several sources (in order of precedence):   
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+     - specified URL in the configuration file (see --dbs-conf)
+
+  Apart from DBS endpoint, other configuration options may be specified for
+  the underlying DBS interface (e.g. "level" for DBS logging level) in a
+  configuration file. The name of this file can be indicated with,
+  in this order:
+     - specified value for --dbs-conf option
+     - DBS_CLIENT_CONFIG environmental variable
+
+
+Specific notes for LFC back-end (DLS_TYPE_LFC):
+
+  LFC implements a hierarchical DLS catalog. The parent directories of the
+  specified FileBlock are checked for existence, and created if non existing.
+
+  Currently understood fileblock attributes are:    
+      guid, filemode, filesize, csumtype, csumvalue
+
+  Currently understood replica attributes are:    
+      sfn, f_type, ptime
+
+  The server endpoint should be of the form: "hname[:port][/path/to/DLS]",
+  where a default port is used if not specified, and the path to DLS is
+  required. The server endpoint is retrieved from (in orden of precedence):
+     - specified value for --endpoint option 
+     - DLS_ENDPOINT environmental variable
+
+
+Options:
+
+The "-f" option can be used to retrieve FileBlock names from a file rather than
+from the given arguments. The file must contain one line per FileBlock to be added,
+optionally with some attributes, then the SEs to associate as locations and
+perhaps the attributes for them; all in the same line and separated by whitespaces.
+In this case, the other options have the same meaning as before and affect all
+FileBlocks in <listfile>.
+
+The "--skip-location-check" option can be used to skip the check of locations
+to be added. If not used, the location hostname is checked for IP resolution
+in order to be accepted as valid location.
+
+The "--allowEmptyBlocks" option indicates that FileBlocks with no associated
+locations may be added to DLS (default is any FileBlock requires at least
+one location to be defined).
+
+The "--dbs-conf" option can be used to specify a configuration file for the
+DBS interface.
+
+The "not-error-tolerant" option will cause the command to break on first error
+adding a FileBlock or location. Otherwise (default), after a failure in one
+replica, the tool tries to go on with next locations (and FileBlocks).
+For DLS_TYPE_LFC, the option is assumed if "-t" is used.
+
+The "-t" option indicates whether transactions should be used. If used, any error
+in an operation provokes a stop (no more additions) and a rollback of the previous
+operations. For DLS_TYPE_LFC, "-t" implies "not-error-tolerant".
+
+ NOTE: It is not recommended to maintain a transaction for too long (~10 seconds).
+ Thus, it is suggested not to include too many FileBlock in a <listfile> if
+ transactions are to be used. For a larger number of FileBlocks, please split them
+ into several invocations of the command.
+   """
+   commonHelpText(ADMITTED_IFACE_TYPES)
+   options()
+   usage()
+
+
+
+def insertEntries(iface, lineList, createParent, trans, verbose, checkHost, allowEmpty, errorTolerant):
+   """
+    Tries to add the specified FileBlocks and locations for each of the lines
+    in lineList. These lines are strings containing information regarding the
+    FileBlock name (LFN), its attributes, and possibly several SEs where a
+    location is located and the attributes for them. 
+
+    The format of a line is then:
+    <lfn> [attr_lfn_1=val ..] [<se1> [attr_se1_1=val ..] ..]
+
+    All elements separated by whitespaces, and attributes identified by the presence
+    of the '=' character.
+
+    Throws DlsApiError if there is a problem in the DLS operation, unless
+    trans is set to True.
+   """
+
+   if(trans): errorTolerant = False
+
+   entryList = []
+
+   for line in lineList:
+
+      # Split
+      line = (line.strip()).split()
+      if(not line):
+         continue
+         
+      # First is LFN
+      lfn = line.pop(0)
+      entry = DlsEntry(DlsFileBlock(lfn)) 
+
+
+      # Then the LFN's attributes (key=val)
+      attrDict = {}
+      while(line):
+         token=line[0]
+         pos = token.find('=')
+         if( pos == -1):
+            break
+         else:
+            line.pop(0)
+            attrDict[token[:pos]] = token[(pos+1):]            
+      entry.fileBlock.attribs = attrDict
+
+      # Then the SEs
+      attrDict = {}      
+      se = ''
+      locList = []
+      for token in line:
+         pos = token.find('=')
+         if( pos == -1):
+            if(se):
+               loc = DlsLocation(se)
+               loc.attribs = attrDict               
+               locList.append(loc)
+            se = token
+            attrDict = {}
+         else:
+            attrDict[token[:pos]] = token[(pos+1):]
+
+      # And the last one, which is left... 
+      if(se):
+         locList.append(DlsLocation(se, attrDict))
+
+      # Now check the locations (unless told otherwise)
+      if(checkHost):
+          for loc in locList:
+             try:             
+               loc.checkHost = True
+               loc.host = loc.host
+               entry.locations.append(loc)
+             except DlsDataObjectError, inst:
+               msg = "Wrong location %s for "%(loc.host)
+               msg += "FileBlock %s: %s" % (entry.fileBlock.name, inst.msg)
+               if(trans):
+                  inst.msg = msg
+                  raise inst
+               else:
+                  if(verbose >= 1):
+                     print "Warning: Skipping location. " + msg + '\n'
+      else:
+          entry.locations = locList
+
+      # Check there was some location left
+      if(not allowEmpty):
+         if(not entry.locations):
+            msg = "FileBlock %s with no associated location." % (lfn)
+            if(not errorTolerant):
+               raise DlsDataObjectError("Error: "+msg)
+            else:
+               if(verbose >= 1):
+                   print "Warning: Skipping " + msg + '\n'
+               continue
+
+      # Store entry
+      entryList.append(entry)
+
+   if(verbose >= 2):
+      print "--DlsApi.add(",
+      for i in entryList: print i, ";",
+      print ")"
+
+   # Finally, do the insertion (and let the caller deal with the exception...)
+   iface.add(entryList, createParent=createParent, trans=trans, session=not trans, checkLocations=False,allowEmptyBlocks=allowEmpty, errorTolerant = errorTolerant)
+
+            
+
+###################### MAIN FUNCTION ########################
+
+def main(pArgs):
+   """
+    Performes the main task of the script (invoked directly).
+    For information on its functionality, please call the help function.
+   """
+
+ # Options and args... 
+   longoptions=["help", "usage", "transaction", "endpoint=", "interface-type=", "verbose=",\
+       "from-file=", "skip-location-check", "allow-empty-blocks", "dbs-conf=", "not-error-tolerant"]
+   try:
+      optlist, args = getopt.getopt(pArgs, 'hute:i:v:f:', longoptions)
+   except getopt.GetoptError, inst:
+      err("Bad usage: "+str(inst))
+      usage()
+      sys.exit(OPT_ERROR)
+
+   rc = 0
+   createParent = True
+   trans = False
+   errorTolerant = True
+   checkHost = True
+   allowEmpty = False
+   dbsConf = None
+   verbose = 1
+   endpoint = None
+   iface_type = None
+   fromFile = False
+   fname=""
+   for opt, val in optlist:
+       if opt in ("-h", "--help"):
+           help()
+           return 0
+
+       elif opt in ("-u", "--usage"):
+           usage()
+           return 0
+           
+       elif opt in ("", "--skip-location-check"):
+           checkHost = False
+
+       elif opt in ("", "--allow-empty-blocks"):
+           allowEmpty = True
+
+       elif opt in ("-t", "--transaction"):
+           trans = True
+
+       elif opt in ("", "--not-error-tolerant"):
+           errorTolerant = False
+
+       elif opt in ("", "--dbs-conf"):
+           dbsConf = val
+
+       elif opt in ("-e","--endpoint"):
+           endpoint = val
+
+       elif opt in ("-i", "--interface-type"):
+           iface_type = val
+
+       elif opt in ("-v", "--verbose"):
+           verbose = check_verbosity_value(val)
+           if(verbose == OPT_ERROR): return OPT_ERROR
+
+       elif opt in ("-f","--from-file"):
+           fromFile = True
+           fname = val
+ 
+ 
+   # Check the interface type (from options or environ)
+   iface_type = check_iface_type(iface_type, ADMITTED_IFACE_TYPES)
+   if (iface_type == TYPE_ERROR): return TYPE_ERROR
+
+
+
+ # Build the arguments
+
+   # From file
+   if(fromFile):
+      try:
+         file=open(fname, 'r')
+      except IOError, inst:
+         msg="The file "+fname+" could not be opened: "+str(inst)
+         err(msg)
+         return FILE_ERROR
+      lineList=file.readlines()
+      file.close()
+      
+   # From command line options
+   else:
+      if(len(args)<1):
+         err("Not enough input arguments")
+         usage()
+         return(OPT_ERROR)
+
+      line=""
+      for token in args:
+         line += token +" "
+      lineList = [line]
+
+
+ # Create the interface binding
+   try: 
+      iface = create_iface_binding(iface_type, endpoint, dbsConf, verbose)
+   except dlsApi.DlsApiError, inst:
+      if(inst.rc):  rc = inst.rc 
+      else:           rc = GENERIC_ERROR
+      msg = "Error when binding the DLS interface: " + str(inst)
+      err(msg)
+      return rc
+
+  # Go
+   try:
+     insertEntries(iface, lineList, createParent, trans, verbose, checkHost, allowEmpty, errorTolerant)
+   except DlsDataObjectError, inst:
+     msg = "Error preparing the DLS request: %s." % str(inst)
+     err(msg)
+     if(inst.rc):  rc = inst.rc 
+     else:         rc = GENERIC_ERROR
+     return rc
+   except dlsApi.DlsApiError, inst:         
+      if(inst.rc):  rc = inst.rc 
+      else:         rc = GENERIC_ERROR
+      msg = "Error in the entry(ies) insertion: %s." % str(inst)
+      err(msg)
+
+
+ # Finally, return error code
+   return rc
+
+
+
+######################### SCRIPT ###########################
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))
